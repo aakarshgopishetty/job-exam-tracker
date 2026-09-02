@@ -1,0 +1,107 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Admin — Deadline Board</title>
+<link rel="icon" href="/icons/icon-192.png" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css" />
+<script>
+  (function () {
+    var saved = localStorage.getItem('theme');
+    var theme = saved || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+    if (theme === 'light') document.documentElement.setAttribute('data-theme', 'light');
+  })();
+</script>
+</head>
+<body>
+
+<div id="loginScreen" class="login-box">
+  <h1>ADMIN LOGIN</h1>
+  <input type="password" id="passwordInput" placeholder="Admin password" />
+  <button class="primary" id="loginBtn" style="width:100%">Log in</button>
+  <div class="error" id="loginError"></div>
+</div>
+
+<div id="adminScreen" class="wrap" style="display:none">
+  <div class="board-header">
+    <div>
+      <h1 class="board-title">Admin<span class="dot">_</span></h1>
+      <div class="board-sub">MANAGE ENTRIES</div>
+    </div>
+    <div class="header-right">
+      <button id="themeToggle" class="icon-btn" title="Toggle light/dark" aria-label="Toggle light/dark theme">🌙</button>
+      <button id="logoutBtn">Log out</button>
+    </div>
+  </div>
+
+  <div class="panel">
+    <h2>Notify subscribers</h2>
+    <input type="text" id="notifyMessage" placeholder="Optional message (default: “New updates are on the board — take a look.”)" />
+    <div class="actions-row">
+      <button id="notifyAllBtn" class="primary">📢 Notify all subscribers now</button>
+    </div>
+    <div class="board-sub" id="notifyStatus"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Paste email text (or text copied from a PDF)</h2>
+    <textarea id="pasteText" placeholder="Paste the email content here…"></textarea>
+    <div class="actions-row">
+      <button id="parseBtn" class="primary">✨ Extract with AI</button>
+    </div>
+    <div id="parsePreview"></div>
+  </div>
+
+  <div class="panel">
+    <h2>Add / edit entry manually</h2>
+    <form id="entryForm">
+      <input type="hidden" id="entryId" />
+      <div class="form-grid">
+        <div>
+          <label>Type</label>
+          <select id="f_type">
+            <option value="job">Job application</option>
+            <option value="exam">Exam</option>
+          </select>
+        </div>
+        <div>
+          <label>Status</label>
+          <select id="f_status">
+            <option value="applied">Applied</option>
+            <option value="interview">Interview</option>
+            <option value="offer">Offer</option>
+            <option value="rejected">Rejected</option>
+            <option value="scheduled">Scheduled</option>
+          </select>
+        </div>
+      </div>
+      <label>Title</label>
+      <input type="text" id="f_title" placeholder="e.g. Software Engineer or DBMS Mid-Sem" />
+      <label>Organization / institute</label>
+      <input type="text" id="f_org" placeholder="e.g. Acme Corp" />
+      <label>Date</label>
+      <input type="date" id="f_date" />
+      <label>Notes</label>
+      <textarea id="f_notes" placeholder="Any extra detail…" style="min-height:60px"></textarea>
+      <div class="actions-row">
+        <button type="submit" class="primary">Save entry</button>
+        <button type="button" id="clearFormBtn">Clear</button>
+      </div>
+    </form>
+  </div>
+
+  <div class="panel">
+    <h2>All entries</h2>
+    <input type="text" id="entrySearch" placeholder="Search by title or organization…" />
+    <div id="entryList"></div>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="/admin.js"></script>
+</body>
+</html>

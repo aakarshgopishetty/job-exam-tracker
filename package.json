@@ -1,0 +1,16 @@
+{
+  "name": "job-exam-tracker",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Job application & exam reminder tracker (Vercel, HTML/CSS/JS + serverless API)",
+  "scripts": {
+    "dev": "vercel dev"
+  },
+  "dependencies": {
+    "pg": "^8.11.5",
+    "jsonwebtoken": "^9.0.2",
+    "cookie": "^0.6.0",
+    "web-push": "^3.6.7",
+    "ics": "^3.7.6"
+  }
+}

@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+<title>Deadline Board</title>
+<meta name="description" content="Upcoming job application and exam deadlines." />
+<link rel="manifest" href="/manifest.json" />
+<link rel="icon" href="/icons/icon-192.png" />
+<link rel="apple-touch-icon" href="/icons/icon-192.png" />
+<meta name="theme-color" content="#0f1115" />
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css" />
+<script>
+  (function () {
+    var saved = localStorage.getItem('theme');
+    var theme = saved || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+    if (theme === 'light') document.documentElement.setAttribute('data-theme', 'light');
+  })();
+</script>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="board-header">
+    <div>
+      <h1 class="board-title">Deadline Board<span class="dot">_</span></h1>
+      <div class="board-sub">JOB APPLICATIONS &amp; EXAMS — LIVE</div>
+    </div>
+    <div class="header-right">
+      <div class="board-sub" id="clock"></div>
+      <button id="themeToggle" class="icon-btn" title="Toggle light/dark" aria-label="Toggle light/dark theme">🌙</button>
+    </div>
+  </div>
+
+  <div class="actions-row">
+    <button id="notifyBtn">🔔 Enable notifications</button>
+    <a class="btn" href="/api/ics">📅 Download calendar (.ics)</a>
+  </div>
+
+  <div class="filter-row">
+    <div class="filter-tabs" id="filterTabs">
+      <button class="filter-tab active" data-filter="all">All</button>
+      <button class="filter-tab" data-filter="job">Jobs</button>
+      <button class="filter-tab" data-filter="exam">Exams</button>
+    </div>
+    <label class="hide-past-toggle">
+      <input type="checkbox" id="hidePastToggle" checked />
+      Hide past
+    </label>
+  </div>
+
+  <div id="board" class="board" aria-live="polite">
+    <div class="empty-state skeleton-state">
+      <div class="skeleton-row"></div>
+      <div class="skeleton-row"></div>
+      <div class="skeleton-row"></div>
+    </div>
+  </div>
+
+  <footer>
+    <span>Add to your home screen for the full app experience.</span>
+    <a href="/admin.html">Admin</a>
+  </footer>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script src="/app.js"></script>
+</body>
+</html>
