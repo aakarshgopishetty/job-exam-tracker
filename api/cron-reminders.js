@@ -1,6 +1,11 @@
 const { sql } = require('../lib/db');
 const { sendToAll } = require('../lib/push');
 
+function formatDate(d) {
+  if (!d) return '';
+  return new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
 // Triggered by Vercel Cron (see vercel.json). Checks reviewed entries whose
 // event_date is exactly 1 day away and haven't been notified for it yet,
 // then pushes a notification to every subscribed viewer. (The other half of
@@ -35,7 +40,7 @@ module.exports = async (req, res) => {
       const label = entry.type === 'exam' ? 'Exam' : 'Job';
       const payload = {
         title: `${label} reminder — ${w.label}`,
-        body: `${entry.title}${entry.organization ? ' @ ' + entry.organization : ''} — ${entry.event_date}`,
+        body: `${entry.title}${entry.organization ? ' @ ' + entry.organization : ''} — ${formatDate(entry.event_date)}`,
       };
       const result = await sendToAll(subs, payload);
       totalSent += result.sent;

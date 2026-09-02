@@ -2,6 +2,11 @@ const { sql } = require('../lib/db');
 const { isAdmin } = require('../lib/auth');
 const { sendToAll } = require('../lib/push');
 
+function formatDate(d) {
+  if (!d) return '';
+  return new Date(d).toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+}
+
 module.exports = async (req, res) => {
   const admin = isAdmin(req);
 
@@ -18,7 +23,7 @@ module.exports = async (req, res) => {
   if (!admin) return res.status(401).json({ error: 'Admin only' });
 
   if (req.method === 'POST') {
-    const { type, title, organization, event_date, status, notes, source, raw_source } = req.body || {};
+    const { type, title, organization, event_date, status, notes, source, raw_source, notify_message } = req.body || {};
     if (!type || !title || !event_date) {
       return res.status(400).json({ error: 'type, title, and event_date are required' });
     }
@@ -39,7 +44,9 @@ module.exports = async (req, res) => {
         const label = entry.type === 'exam' ? 'Exam' : 'Job';
         const result = await sendToAll(subs, {
           title: `New ${label.toLowerCase()} added`,
-          body: `${entry.title}${entry.organization ? ' @ ' + entry.organization : ''} — ${entry.event_date}`,
+          body: (notify_message && notify_message.trim())
+            ? notify_message.trim()
+            : `${entry.title}${entry.organization ? ' @ ' + entry.organization : ''} — ${formatDate(entry.event_date)}`,
         });
         notified = { sent: result.sent, failed: result.failed };
         if (result.expiredEndpoints.length) {

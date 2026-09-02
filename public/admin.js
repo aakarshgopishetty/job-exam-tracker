@@ -154,6 +154,7 @@ document.getElementById('entryForm').addEventListener('submit', async (e) => {
     organization: document.getElementById('f_org').value,
     event_date: document.getElementById('f_date').value,
     notes: document.getElementById('f_notes').value,
+    notify_message: document.getElementById('f_notify_msg').value,
   };
   if (!body.title || !body.event_date) return toast('Title and date are required.');
 
@@ -183,6 +184,7 @@ function clearForm() {
   document.getElementById('entryId').value = '';
   document.getElementById('parsePreview').innerHTML = '';
   document.getElementById('pasteText').value = '';
+  document.getElementById('f_notify_msg').value = '';
 }
 
 // ---------- entry list ----------
