@@ -1,6 +1,4 @@
-importScripts('core.js');
-
-const CACHE = 'lastdate-v2';
+const CACHE = 'lastdate-v3';
 const SHELL = ['./', 'index.html', 'core.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {
@@ -15,7 +13,7 @@ self.addEventListener('activate', e => {
   );
 });
 
-// Cached copy first, refreshed in the background. Fonts are cached the same way so the app looks right offline.
+// Cached copy first, refreshed in the background, so the app opens instantly and works offline.
 self.addEventListener('fetch', e => {
   const req = e.request;
   if (req.method !== 'GET') return;
@@ -29,29 +27,4 @@ self.addEventListener('fetch', e => {
       .catch(() => hit || cache.match('index.html'));
     return hit || net;
   }));
-});
-
-const show = m => self.registration.showNotification(m.title, {
-  body: m.body,
-  icon: 'icon-192.png',
-  badge: 'icon-192.png',
-  tag: m.key,
-  data: { jobId: m.jobId }
-});
-
-// Chrome on Android can wake an installed app now and then. Timing is up to the browser, so this is best effort.
-self.addEventListener('periodicsync', e => {
-  if (e.tag === 'check-reminders') e.waitUntil(LD.runDue(show));
-});
-
-self.addEventListener('notificationclick', e => {
-  e.notification.close();
-  const id = e.notification.data && e.notification.data.jobId;
-  e.waitUntil((async () => {
-    const all = await clients.matchAll({ type: 'window', includeUncontrolled: true });
-    for (const c of all) {
-      if ('focus' in c) { await c.focus(); c.postMessage({ open: id }); return; }
-    }
-    await clients.openWindow('./#open=' + encodeURIComponent(id || ''));
-  })());
 });
