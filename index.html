@@ -604,10 +604,8 @@ document.addEventListener('submit', async e => {
       const j = { id: LD.newId(), v: now, postedAt: now, receivedAt: now, applied: false, by: S.me.name, ...data };
       S.jobs.push(j);
       await save();
-      await LD.setFired(j.id + '|posted', { t: now, skip: 1 }); // you posted it, no reminder needed, but confirm it went through
-      await refreshFired();
       tab = 'open'; openId = j.id; render();
-      toast('Job posted: ' + j.company + ' - ' + j.role);
+      await announce(j, 'posted', 'posted'); // real notification the moment you post, same as friends get
       openShare(j, 'new');
     }
   }
