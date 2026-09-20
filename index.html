@@ -169,10 +169,11 @@ const ago = t => {
 };
 
 /* ---------- state ---------- */
-let S = { me: null, jobs: [] };      // me: { name, admin, nb }, jobs live on this device
+let S = { me: null, jobs: [], admin: null, pin: null }; // me: { name, nb }; admin: signing key (admin device only); pin: the admin key this device trusts
 let FIRED = {};                      // reminders already delivered: "jobId|kind" -> { t, title, body, read }
 let tab = 'open', openId = null, pending = null, installEvt = null, lastDay = '', shareMsg = '', curSheet = '';
 const save = () => LD.set('state', S);
+const isAdmin = () => !!(S.admin && S.admin.d);
 const refreshFired = async () => { FIRED = (await LD.get('fired')) || {}; };
 const status = (j, now) => j.applied ? 'applied' : (now > LD.deadlineAt(j) ? 'closed' : 'open');
 
@@ -252,19 +253,24 @@ async function announce(job, suffix, kind) {
 async function addFromPayload(str) {
   let raw;
   try { raw = await LD.decode(str); } catch (e) { toast('That link is broken. Ask for a fresh one.'); return false; }
-  const j = cleanJob(raw || {});
+  raw = raw || {};
+  if (!(window.crypto && crypto.subtle)) { toast('Open this app over https so it can check who posted the job.'); return false; }
+  if (!(await LD.verify(raw))) { toast('That link is not signed by an admin, so it was ignored.'); return false; }
+  if (S.pin && S.pin.k !== raw.k) { toast(`That job was not posted by ${S.pin.by || 'your admin'}, so it was ignored.`); return false; }
+  const j = cleanJob(raw);
   if (!j) { toast('That link is not a job.'); return false; }
+  if (!S.pin) S.pin = { k: raw.k, by: j.by || 'your admin' }; // first signed link decides who this device trusts
   const ex = S.jobs.find(x => x.id === j.id);
   if (ex) {
     openId = ex.id; tab = status(ex, new Date());
     if (j.v <= ex.v) { render(); toast('You already have this job.'); return true; }
     const resched = ex.d !== j.d || ex.t !== j.t || ex.rt !== j.rt;
-    Object.assign(ex, j, { applied: ex.applied, receivedAt: ex.receivedAt });
+    Object.assign(ex, j, { applied: ex.applied, receivedAt: ex.receivedAt, raw });
     await save();
     if (resched) await LD.clearFired(ex.id, ['d1', 'd0']);
     await announce(ex, 'upd' + j.v, 'upd');
   } else {
-    j.applied = false; j.receivedAt = Date.now();
+    j.applied = false; j.receivedAt = Date.now(); j.raw = raw;
     S.jobs.push(j);
     await save();
     await announce(j, 'posted', 'posted');
@@ -279,8 +285,11 @@ async function consumePending() {
   await addFromPayload(p);
 }
 async function buildLink(j) {
-  const p = await LD.encode({ i: j.id, v: j.v, c: j.company, r: j.role, d: j.d, t: j.t, rt: j.rt, l: j.link, e: j.elig, p: j.pay, o: j.loc, n: j.note, a: j.by, at: j.postedAt });
-  return location.href.split('#')[0].split('?')[0] + '#j=' + p;
+  let payload;
+  if (isAdmin()) payload = await LD.sign(S.admin, { i: j.id, v: j.v, c: j.company, r: j.role, d: j.d, t: j.t, rt: j.rt, l: j.link, e: j.elig, p: j.pay, o: j.loc, n: j.note, a: j.by, at: j.postedAt });
+  else if (j.raw) payload = j.raw;   // friends can forward the admin's original signed post
+  else return null;
+  return location.href.split('#')[0].split('?')[0] + '#j=' + await LD.encode(payload);
 }
 function shareText(j, link, mode) {
   const n = LD.daysLeft(j, new Date());
@@ -304,7 +313,7 @@ function countBlock(j, st, now) {
   return { num: String(n), unit: n === 1 ? 'day left' : 'days left', c: urgency(n) };
 }
 function hero(open, now) {
-  const admin = S.me.admin;
+  const admin = isAdmin();
   if (!S.jobs.length) return admin
     ? ['Post your first job', 'Add a job, then send the link to your friends on WhatsApp.']
     : ['No jobs yet', 'When your admin shares a job link, it shows up here with reminders.'];
@@ -331,8 +340,8 @@ function detailHTML(j, st) {
     <div class="actions">
       ${j.link ? `<a class="btn primary" href="${esc(j.link)}" target="_blank" rel="noopener noreferrer">Apply now</a>` : ''}
       <button class="btn" data-act="applied" data-id="${id}">${j.applied ? 'Undo applied' : 'Mark as applied'}</button>
-      <button class="btn" data-act="share" data-id="${id}">${ic('send')}Share on WhatsApp</button>
-      ${S.me.admin ? `<button class="btn" data-act="edit" data-id="${id}">Edit</button><button class="btn danger" data-act="delete" data-id="${id}">Delete</button>` : ''}
+      ${isAdmin() || j.raw ? `<button class="btn" data-act="share" data-id="${id}">${ic('send')}Share on WhatsApp</button>` : ''}
+      ${isAdmin() ? `<button class="btn" data-act="edit" data-id="${id}">Edit</button><button class="btn danger" data-act="delete" data-id="${id}">Delete</button>` : ''}
     </div></div>`;
 }
 function jobRow(j, now) {
@@ -351,7 +360,6 @@ function onboardHTML() {
     <p class="lead">${pending ? 'A job was shared with you. Add your name to see it and get reminders.' : 'Job deadlines from your admin, with reminders before they close.'}</p>
     <form id="nameForm">
       <label class="field"><span>Your name</span><input name="name" required maxlength="40" autocomplete="given-name"></label>
-      <label class="check"><input type="checkbox" name="admin"><span>I'm the admin and I'll post jobs</span></label>
       <button class="btn primary wide">Continue</button>
     </form>
     <p class="fine">No account needed. Jobs and reminders are stored on this device.</p></main>`;
@@ -366,7 +374,7 @@ function render() {
   g.open.sort(asc); g.applied.sort(asc); g.closed.sort((a, b) => asc(b, a));
   const [h, sub] = hero(g.open, now);
   const empty = {
-    open: S.jobs.length ? 'No open jobs right now.' : (S.me.admin ? 'Tap Post a job to add the first one.' : 'Waiting for your first job link.'),
+    open: S.jobs.length ? 'No open jobs right now.' : (isAdmin() ? 'Tap Post a job to add the first one.' : 'Waiting for your first job link.'),
     applied: 'Jobs you mark as applied show up here and stop sending reminders.',
     closed: 'Jobs move here after their last date.'
   }[tab];
@@ -381,9 +389,9 @@ function render() {
     ${banner()}
     <div class="tabs" role="tablist">${['open', 'applied', 'closed'].map(t => `<button class="tab" role="tab" data-act="tab" data-tab="${t}" aria-selected="${tab === t}">${names[t]}<small>${g[t].length}</small></button>`).join('')}</div>
     ${g[tab].length ? `<ul class="list">${g[tab].map(j => jobRow(j, now)).join('')}</ul>` : `<p class="empty">${empty}</p>`}
-    ${S.me.admin ? '' : '<button class="link" data-act="paste">Add a job from a link</button>'}
+    ${isAdmin() ? '' : '<button class="link" data-act="paste">Add a job from a link</button>'}
   </main>
-  ${S.me.admin ? `<button class="fab" data-act="post">${ic('plus')}Post a job</button>` : ''}`;
+  ${isAdmin() ? `<button class="fab" data-act="post">${ic('plus')}Post a job</button>` : ''}`;
   updateBell();
 }
 function updateBell() {
@@ -416,6 +424,7 @@ function jobForm(j) {
 }
 async function openShare(j, mode) {
   const link = await buildLink(j);
+  if (!link) { toast('This job cannot be shared from this device.'); return; }
   shareMsg = shareText(j, link, mode);
   const head = { new: 'Job posted. Send it to your friends.', update: 'Saved. Send the update to your friends.', nudge: 'Send a reminder' }[mode];
   const hint = mode === 'nudge'
@@ -460,11 +469,45 @@ function settingsSheet() {
   const ntext = { granted: 'On', denied: 'Blocked in your browser settings', default: 'Off', na: 'Not available in this browser' }[perm];
   sheet(`<div class="sheet"><h2>Settings</h2>
     <label class="field"><span>Your name</span><input data-set="name" value="${esc(S.me.name)}" maxlength="40" autocomplete="given-name"></label>
-    <label class="check"><input type="checkbox" data-set="admin" ${S.me.admin ? 'checked' : ''}><span>I'm the admin<br><small>Lets you post jobs and share them. Friends only receive them.</small></span></label>
+    ${isAdmin()
+      ? '<div class="rowline"><div>Admin<br><small>Only this device can post jobs.</small></div><button class="btn sm" data-act="adminBackup">Backup key</button></div>'
+      : `<div class="rowline"><div>Jobs accepted from<br><small>${S.pin ? esc(S.pin.by || 'your admin') + '. Jobs signed by anyone else are ignored.' : 'Your admin, once you open their first link.'}</small></div>${S.pin ? '<button class="btn sm" data-act="unpin">Change</button>' : ''}</div>`}
     <div class="rowline"><div>Notifications<br><small>${ntext}</small></div>${perm === 'default' ? '<button class="btn sm" data-act="notif">Turn on</button>' : ''}</div>
     ${installEvt ? '<div class="rowline"><div>Install app<br><small>Add Last Date to your home screen.</small></div><button class="btn sm" data-act="install">Install</button></div>' : ''}
     <p class="fine">Reminders are checked whenever the app is open. On Android, the installed app also checks in the background when the browser allows it, so timing can vary.</p>
     <div class="actions"><button class="btn danger sm" data-act="reset">Clear this device</button><button class="btn ghost" data-act="close">Close</button></div></div>`, 'settings');
+}
+
+/* ---------- admin setup ---------- */
+function adminSetupSheet() {
+  sheet(`<form class="sheet" id="adminForm"><h2>Set up admin</h2>
+    <p class="fine">This device becomes the only one that can post jobs. Friends' apps accept only jobs signed with your key, so nobody else can post for you.</p>
+    <label class="field"><span>Your name</span><input name="name" required maxlength="40" value="${esc(S.me ? S.me.name : '')}" autocomplete="given-name"></label>
+    <div class="actions"><button class="btn primary">Create admin key</button></div>
+    <label class="field"><span>Already have a backup key? Paste it here</span><textarea name="bk" rows="3" placeholder="LDK1."></textarea></label>
+    <div class="actions"><button type="button" class="btn" data-act="adminRestore">Restore from backup</button><button type="button" class="btn ghost" data-act="close">Cancel</button></div></form>`, 'admin');
+}
+function backupSheet(first) {
+  sheet(`<div class="sheet"><h2>${first ? 'You are the admin' : 'Admin key backup'}</h2>
+    <p class="fine">${first ? 'Save this backup key now. ' : ''}If you lose this phone or clear its data, this key is the only way to keep posting as the admin. Keep it private: anyone who has it can post as you.</p>
+    <label class="field"><span>Backup key</span><textarea readonly rows="4" id="bkText">${esc(LD.backupOf(S.admin))}</textarea></label>
+    <div class="actions"><button class="btn primary" data-act="copyBackup">Copy backup key</button><button class="btn ghost" data-act="close">Done</button></div></div>`, 'backup');
+}
+function openAdmin() {
+  history.replaceState(null, '', location.href.split('#')[0]);
+  if (isAdmin()) backupSheet(false); else adminSetupSheet();
+}
+async function becomeAdmin(name, key) {
+  S.admin = key;
+  S.me = Object.assign(S.me || {}, { name });
+  S.pin = { k: key.x + key.y, by: name };
+  await save();
+  closeSheet(); render();
+}
+async function copyBackup() {
+  const ta = $('#bkText'); ta.select();
+  try { await navigator.clipboard.writeText(ta.value); } catch (e) { try { document.execCommand('copy'); } catch (e2) {} }
+  toast('Backup key copied.');
 }
 
 /* ---------- events ---------- */
@@ -505,8 +548,23 @@ document.addEventListener('click', async e => {
     if (row) row.scrollIntoView({ block: 'center' });
   }
   else if (act === 'install' && installEvt) { installEvt.prompt(); installEvt = null; closeSheet(); }
+  else if (act === 'adminBackup') backupSheet(false);
+  else if (act === 'copyBackup') copyBackup();
+  else if (act === 'adminRestore') {
+    const f = $('#adminForm');
+    const name = f.querySelector('[name=name]').value.trim().slice(0, 40);
+    const key = LD.readBackup(f.querySelector('[name=bk]').value);
+    if (!name) { toast('Add your name first.'); return; }
+    if (!key) { toast('That backup key is not valid.'); return; }
+    await becomeAdmin(name, key);
+    toast('Admin restored on this device.');
+  }
+  else if (act === 'unpin') {
+    if (confirm('Stop trusting this admin? The next job link you open decides who you trust.')) { S.pin = null; await save(); settingsSheet(); }
+  }
   else if (act === 'reset') {
-    if (confirm('Remove all jobs, reminders and your name from this device?')) { await LD.clear(); location.href = location.href.split('#')[0]; }
+    const msg = isAdmin() ? 'This also removes your admin key from this device. Copy the backup key first. Remove everything?' : 'Remove all jobs, reminders and your name from this device?';
+    if (confirm(msg)) { await LD.clear(); location.href = location.href.split('#')[0]; }
   }
 });
 
@@ -516,12 +574,20 @@ document.addEventListener('submit', async e => {
   if (f.id === 'nameForm') {
     const name = v('name').slice(0, 40);
     if (!name) return;
-    S.me = { name, admin: fd.get('admin') === 'on' };
+    S.me = { name };
     await save(); render();
     if (pending) await consumePending();
     tick();
   }
+  else if (f.id === 'adminForm') {
+    const name = v('name').slice(0, 40);
+    if (!name) return;
+    if (!(window.crypto && crypto.subtle)) { toast('Open this app over https to create an admin key.'); return; }
+    await becomeAdmin(name, await LD.newAdminKey());
+    backupSheet(true);
+  }
   else if (f.id === 'jobForm') {
+    if (!isAdmin()) return;
     let link = v('link');
     if (link && !/^[a-z][a-z0-9+.-]*:/i.test(link)) link = 'https://' + link;
     const clean = link ? safeUrl(link) : '';
@@ -562,9 +628,7 @@ document.addEventListener('change', async e => {
   if (!t.dataset || !t.dataset.set || !S.me) return;
   if (t.dataset.set === 'name') {
     const n = t.value.trim().slice(0, 40);
-    if (n) { S.me.name = n; await save(); toast('Name saved.'); }
-  } else if (t.dataset.set === 'admin') {
-    S.me.admin = t.checked; await save(); render();
+    if (n) { S.me.name = n; if (isAdmin()) S.pin = Object.assign({}, S.pin, { by: n }); await save(); toast('Name saved.'); }
   }
 });
 
@@ -573,7 +637,7 @@ window.addEventListener('hashchange', () => {
   if (location.hash.startsWith('#j=')) {
     pending = location.hash.slice(3);
     if (S.me) consumePending(); else render();
-  }
+  } else if (location.hash === '#admin') openAdmin();
 });
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') tick(); });
 
@@ -595,6 +659,7 @@ async function boot() {
     if (j) tab = status(j, new Date());
   }
   render();
+  if (h === '#admin') openAdmin();
   if (S.me && pending) await consumePending();
   await tick();
   setInterval(tick, 30000);

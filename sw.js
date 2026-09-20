@@ -1,6 +1,6 @@
 importScripts('core.js');
 
-const CACHE = 'lastdate-v1';
+const CACHE = 'lastdate-v2';
 const SHELL = ['./', 'index.html', 'core.js', 'manifest.webmanifest', 'icon-192.png', 'icon-512.png'];
 
 self.addEventListener('install', e => {

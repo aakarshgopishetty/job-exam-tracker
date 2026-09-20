@@ -180,5 +180,38 @@
     return cur;
   });
 
-  g.LD = { get, set, update, clear, encode, decode, newId, pad, at, shiftDay, todayStr, deadlineAt, daysLeft, fmtTime, dateLabel, times, message, evaluate, runDue, setFired, clearFired };
+
+  /* ---------- admin signing (ECDSA P-256): friends only accept jobs signed by the admin's key ---------- */
+  const ALG = { name: 'ECDSA', namedCurve: 'P-256' }, SIG = { name: 'ECDSA', hash: 'SHA-256' };
+  const FIELDS = ['i', 'v', 'c', 'r', 'd', 't', 'rt', 'l', 'e', 'p', 'o', 'n', 'a', 'at'];
+  // the exact bytes that get signed: a fixed-order list of the job fields
+  const canon = p => new TextEncoder().encode(JSON.stringify(FIELDS.map(k => p[k] == null ? '' : p[k])));
+  async function newAdminKey() {
+    const kp = await crypto.subtle.generateKey(ALG, true, ['sign', 'verify']);
+    const jwk = await crypto.subtle.exportKey('jwk', kp.privateKey);
+    return { d: jwk.d, x: jwk.x, y: jwk.y };
+  }
+  async function sign(key, payload) {
+    const pk = await crypto.subtle.importKey('jwk', { kty: 'EC', crv: 'P-256', d: key.d, x: key.x, y: key.y }, ALG, false, ['sign']);
+    const sig = new Uint8Array(await crypto.subtle.sign(SIG, pk, canon(payload)));
+    return Object.assign({}, payload, { k: key.x + key.y, s: b64(sig) });
+  }
+  async function verify(p) {
+    try {
+      if (!p || typeof p.k !== 'string' || p.k.length !== 86 || typeof p.s !== 'string') return false;
+      const pk = await crypto.subtle.importKey('jwk', { kty: 'EC', crv: 'P-256', x: p.k.slice(0, 43), y: p.k.slice(43) }, ALG, false, ['verify']);
+      return await crypto.subtle.verify(SIG, pk, unb64(p.s), canon(p));
+    } catch (e) { return false; }
+  }
+  const backupOf = k => 'LDK1.' + b64(new TextEncoder().encode(JSON.stringify({ d: k.d, x: k.x, y: k.y })));
+  function readBackup(s) {
+    try {
+      s = String(s || '').trim();
+      if (!s.startsWith('LDK1.')) return null;
+      const k = JSON.parse(new TextDecoder().decode(unb64(s.slice(5))));
+      return (k.d && k.x && k.y && k.x.length === 43 && k.y.length === 43) ? { d: k.d, x: k.x, y: k.y } : null;
+    } catch (e) { return null; }
+  }
+
+  g.LD = { get, set, update, clear, encode, decode, newId, pad, at, shiftDay, todayStr, deadlineAt, daysLeft, fmtTime, dateLabel, times, message, evaluate, runDue, setFired, clearFired, newAdminKey, sign, verify, backupOf, readBackup };
 })(typeof self !== 'undefined' ? self : window);
