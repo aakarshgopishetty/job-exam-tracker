@@ -480,12 +480,11 @@ function settingsSheet() {
 
 /* ---------- admin setup ---------- */
 function adminSetupSheet() {
-  sheet(`<form class="sheet" id="adminForm"><h2>Set up admin</h2>
-    <p class="fine">This device becomes the only one that can post jobs. Friends' apps accept only jobs signed with your key, so nobody else can post for you.</p>
+  sheet(`<form class="sheet" id="adminForm"><h2>Admin sign-in</h2>
+    <p class="fine">Only the person with the admin backup key can post jobs. If that's not you, there's nothing to do here — close this.</p>
     <label class="field"><span>Your name</span><input name="name" required maxlength="40" value="${esc(S.me ? S.me.name : '')}" autocomplete="given-name"></label>
-    <div class="actions"><button class="btn primary">Create admin key</button></div>
-    <label class="field"><span>Already have a backup key? Paste it here</span><textarea name="bk" rows="3" placeholder="LDK1."></textarea></label>
-    <div class="actions"><button type="button" class="btn" data-act="adminRestore">Restore from backup</button><button type="button" class="btn ghost" data-act="close">Cancel</button></div></form>`, 'admin');
+    <label class="field"><span>Backup key</span><textarea name="bk" rows="3" placeholder="LDK1."></textarea></label>
+    <div class="actions"><button type="button" class="btn primary" data-act="adminRestore">Restore admin access</button><button type="button" class="btn ghost" data-act="close">Cancel</button></div></form>`, 'admin');
 }
 function backupSheet(first) {
   sheet(`<div class="sheet"><h2>${first ? 'You are the admin' : 'Admin key backup'}</h2>
@@ -580,11 +579,7 @@ document.addEventListener('submit', async e => {
     tick();
   }
   else if (f.id === 'adminForm') {
-    const name = v('name').slice(0, 40);
-    if (!name) return;
-    if (!(window.crypto && crypto.subtle)) { toast('Open this app over https to create an admin key.'); return; }
-    await becomeAdmin(name, await LD.newAdminKey());
-    backupSheet(true);
+    e.preventDefault(); // no submit button remains on this form; admin access is restore-only now
   }
   else if (f.id === 'jobForm') {
     if (!isAdmin()) return;
@@ -609,9 +604,10 @@ document.addEventListener('submit', async e => {
       const j = { id: LD.newId(), v: now, postedAt: now, receivedAt: now, applied: false, by: S.me.name, ...data };
       S.jobs.push(j);
       await save();
-      await LD.setFired(j.id + '|posted', { t: now, skip: 1 }); // you posted it, no need to remind yourself
+      await LD.setFired(j.id + '|posted', { t: now, skip: 1 }); // you posted it, no reminder needed, but confirm it went through
       await refreshFired();
       tab = 'open'; openId = j.id; render();
+      toast('Job posted: ' + j.company + ' - ' + j.role);
       openShare(j, 'new');
     }
   }

@@ -70,10 +70,9 @@
     return new Uint8Array(await new Response(stream.readable).arrayBuffer());
   };
   async function encode(obj) {
+    // No compression: some phones/in-app browsers (e.g. WhatsApp's) lack DecompressionStream,
+    // which silently broke links for those friends. Plain base64 decodes everywhere.
     const raw = new TextEncoder().encode(JSON.stringify(obj));
-    if (typeof CompressionStream !== 'undefined') {
-      try { return 'z' + b64(await pipe(raw, new CompressionStream('deflate-raw'))); } catch (e) { /* fall through */ }
-    }
     return 'r' + b64(raw);
   }
   async function decode(str) {
