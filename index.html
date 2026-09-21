@@ -146,6 +146,36 @@ textarea{resize:vertical;min-height:84px}
 (() => {
 'use strict';
 
+/* =====================================================================
+   GITHUB SETUP — fill this in with your own repo details.
+   The job list lives in a file called jobs.json inside this same repo.
+   1) In your repo, create a new file named jobs.json at the root, with
+      just: []   (an empty array) — then commit it.
+   2) GitHub -> Settings -> Developer settings -> Personal access tokens
+      -> Fine-grained tokens -> Generate new token. Under "Repository
+      access" pick only this one repo. Under "Permissions" set
+      "Contents" to "Read and write". Copy the token (starts with
+      "github_pat_") and paste it below.
+   Note: this token lives in the page's code, so anyone who opens this
+   site can see it in the browser dev tools. Scoping it to just this
+   repo's contents (as above) limits the worst case to someone editing
+   files in this repo — nothing else on your GitHub account.
+   ===================================================================== */
+const GITHUB = {
+  owner: 'PASTE_YOUR_GITHUB_USERNAME',
+  repo: 'PASTE_YOUR_REPO_NAME',
+  branch: 'main',                 // change if your repo's default branch is different (e.g. "master")
+  path: 'jobs.json',
+  token: 'PASTE_YOUR_FINE_GRAINED_TOKEN'
+};
+const ghConfigured = () => !GITHUB.owner.startsWith('PASTE_') && !GITHUB.repo.startsWith('PASTE_') && !GITHUB.token.startsWith('PASTE_');
+const rawUrl = () => `https://raw.githubusercontent.com/${GITHUB.owner}/${GITHUB.repo}/${GITHUB.branch}/${GITHUB.path}?t=${Date.now()}`;
+const apiUrl = () => `https://api.github.com/repos/${GITHUB.owner}/${GITHUB.repo}/contents/${GITHUB.path}`;
+const authHeaders = () => ({ 'Authorization': 'Bearer ' + GITHUB.token, 'Accept': 'application/vnd.github+json', 'Content-Type': 'application/json' });
+const toB64 = str => btoa(String.fromCharCode(...new TextEncoder().encode(str)));
+const fromB64 = b64 => new TextDecoder().decode(Uint8Array.from(atob(b64), c => c.charCodeAt(0)));
+const newId = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+
 /* ---------- small helpers ---------- */
 const $ = s => document.querySelector(s);
 const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -168,11 +198,15 @@ const ago = t => {
   return d + (d === 1 ? ' day ago' : ' days ago');
 };
 
-/* ---------- state ---------- */
-let S = { me: null, jobs: [] }; // me: { name }
-let FIRED = {};                      // reminders already delivered: "jobId|kind" -> { t, title, body, read }
-let tab = 'open', openId = null, pending = null, installEvt = null, lastDay = '', shareMsg = '', curSheet = '';
-const save = () => LD.set('state', S);
+/* ---------- state ----------
+   S.me: your name (local, per device). S.jobs: the shared job list (from jobs.json in the
+   repo — same for everyone). appliedMap: which jobs YOU marked applied (local, not shared). */
+let S = { me: null, jobs: [] };
+let appliedMap = {};
+let jobsLoaded = false;
+let lastJobsText = null; // raw JSON text of the last fetch, to skip re-rendering when nothing changed
+let FIRED = {};
+let tab = 'open', openId = null, installEvt = null, lastDay = '', shareMsg = '', curSheet = '';
 const refreshFired = async () => { FIRED = (await LD.get('fired')) || {}; };
 const status = (j, now) => j.applied ? 'applied' : (now > LD.deadlineAt(j) ? 'closed' : 'open');
 
@@ -197,81 +231,75 @@ dlg.addEventListener('click', e => { if (e.target === dlg) closeSheet(); });
 
 /* ---------- reminders (in-app only, no push notifications) ---------- */
 function notify(m) {
-  // No OS notifications: reminders just show up in the app (hero text, bell inbox, and
-  // a quick toast if you happen to have it open when one becomes due).
   if (document.visibilityState === 'visible') toast(m.title);
 }
 async function tick() {
-  if (!S.me) return;
+  if (!S.me || !jobsLoaded) return;
   let out = [];
-  try { out = await LD.runDue(notify); await refreshFired(); } catch (e) {}
+  try { out = await LD.runDue(S.jobs, notify); await refreshFired(); } catch (e) {}
   const day = new Date().toDateString();
   if (out.length || day !== lastDay) { lastDay = day; render(); } else updateBell();
 }
 
-/* ---------- jobs coming in from share links ---------- */
-function cleanJob(p) {
-  const s = (v, n) => typeof v === 'string' ? v.trim().slice(0, n) : '';
-  const j = {
-    id: s(p.i, 24), v: Number(p.v) || 0,
-    company: s(p.c, 80), role: s(p.r, 120),
-    d: s(p.d, 10), t: s(p.t, 5) || '23:59', rt: s(p.rt, 5) || '09:00',
-    link: safeUrl(s(p.l, 600)), elig: s(p.e, 200), pay: s(p.p, 120), loc: s(p.o, 120), note: s(p.n, 1200),
-    by: s(p.a, 60), postedAt: Number(p.at) || Date.now()
-  };
-  const ok = /^[\w-]{3,24}$/.test(j.id) && j.company && j.role && /^\d{4}-\d{2}-\d{2}$/.test(j.d) && /^\d{2}:\d{2}$/.test(j.t) && /^\d{2}:\d{2}$/.test(j.rt);
-  return ok ? j : null;
+/* ---------- GitHub: the shared job list lives in jobs.json in your repo ---------- */
+function mergeApplied(list) {
+  return list.map(j => ({ ...j, applied: !!appliedMap[j.id] }));
 }
-async function announce(job, suffix, kind) {
-  const m = LD.message(job, kind);
-  const key = job.id + '|' + suffix;
-  await LD.setFired(key, { t: Date.now(), title: m.title, body: m.body, read: 0 });
-  await refreshFired();
-  await notify({ key, jobId: job.id, title: m.title, body: m.body });
-}
-async function addFromPayload(str) {
-  let raw;
-  try { raw = await LD.decode(str); } catch (e) { toast('That link is broken. Ask for a fresh one.'); return false; }
-  const j = cleanJob(raw || {});
-  if (!j) { toast('That link is not a job.'); return false; }
-  const ex = S.jobs.find(x => x.id === j.id);
-  if (ex) {
-    openId = ex.id; tab = status(ex, new Date());
-    if (j.v <= ex.v) { render(); toast('You already have this job.'); return true; }
-    const resched = ex.d !== j.d || ex.t !== j.t || ex.rt !== j.rt;
-    Object.assign(ex, j, { applied: ex.applied, receivedAt: ex.receivedAt, raw });
-    await save();
-    if (resched) await LD.clearFired(ex.id, ['d1', 'd0']);
-    await announce(ex, 'upd' + j.v, 'upd');
-  } else {
-    j.applied = false; j.receivedAt = Date.now(); j.raw = raw;
-    S.jobs.push(j);
-    await save();
-    await announce(j, 'posted', 'posted');
-    openId = j.id; tab = status(j, new Date());
-  }
-  render();
+// Public read: no token needed, works for every visitor straight from the repo's raw file.
+async function loadJobsPublic() {
+  const res = await fetch(rawUrl(), { cache: 'no-store' });
+  if (res.status === 404) throw new Error('jobs.json not found in the repo yet.');
+  if (!res.ok) throw new Error('GitHub read failed: ' + res.status);
+  const text = await res.text();
+  if (text === lastJobsText) return false; // nothing changed since last poll
+  lastJobsText = text;
+  S.jobs = mergeApplied(JSON.parse(text || '[]'));
   return true;
 }
-async function consumePending() {
-  const p = pending; pending = null;
-  history.replaceState(null, '', location.href.split('#')[0]);
-  await addFromPayload(p);
+async function pollJobs() {
+  try {
+    const changed = await loadJobsPublic();
+    jobsLoaded = true;
+    if (changed) { render(); tick(); } else updateBell();
+  } catch (e) {
+    jobsLoaded = true;
+    toast(e.message || 'Could not reach the shared job list.');
+    render();
+  }
 }
-async function buildLink(j) {
-  const payload = j.raw || { i: j.id, v: j.v, c: j.company, r: j.role, d: j.d, t: j.t, rt: j.rt, l: j.link, e: j.elig, p: j.pay, o: j.loc, n: j.note, a: j.by, at: j.postedAt };
-  return location.href.split('#')[0].split('?')[0] + '#j=' + await LD.encode(payload);
+// Authenticated read+write: only needed the moment someone adds/edits/deletes a job.
+async function ghGetForWrite() {
+  const res = await fetch(apiUrl() + '?ref=' + GITHUB.branch, { headers: authHeaders(), cache: 'no-store' });
+  if (!res.ok) throw new Error('Could not read jobs.json (status ' + res.status + '). Check your GitHub setup.');
+  const data = await res.json();
+  return { arr: JSON.parse(fromB64(data.content.replace(/\n/g, '')) || '[]'), sha: data.sha };
 }
-function shareText(j, link, mode) {
-  const n = LD.daysLeft(j, new Date());
-  const head = mode === 'new' ? 'New job' : mode === 'update' ? 'Updated job' : n <= 0 ? 'Last day today' : n === 1 ? 'Closes tomorrow' : 'Job alert';
-  const lines = [`*${head}: ${j.company}, ${j.role}*`, `Last date: ${LD.dateLabel(j)}, ${LD.fmtTime(j.t)}`];
-  if (j.loc) lines.push(`Location: ${j.loc}`);
-  if (j.pay) lines.push(`Pay: ${j.pay}`);
-  if (j.elig) lines.push(`Eligibility: ${j.elig}`);
-  if (j.link) lines.push(`Apply: ${j.link}`);
-  lines.push('', 'Open this in Last Date to get reminders:', link);
-  return lines.join('\n');
+async function ghPut(arr, sha, message) {
+  const res = await fetch(apiUrl(), {
+    method: 'PUT', headers: authHeaders(),
+    body: JSON.stringify({ message, content: toB64(JSON.stringify(arr, null, 2)), sha, branch: GITHUB.branch })
+  });
+  if (res.status === 409) { const e = new Error('conflict'); e.conflict = true; throw e; }
+  if (!res.ok) throw new Error('Could not save to GitHub (status ' + res.status + ').');
+  return res.json();
+}
+async function ghWrite(mutate, message) {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const { arr, sha } = await ghGetForWrite();
+    const result = mutate(arr);
+    try { await ghPut(arr, sha, message); return result; }
+    catch (e) { if (!e.conflict || attempt === 1) throw e; } // someone else wrote first — retry once against latest data
+  }
+}
+async function initGithub() {
+  if (!ghConfigured()) {
+    jobsLoaded = true;
+    render();
+    toast('Add your GitHub repo details at the top of index.html to connect the shared job list.');
+    return;
+  }
+  await pollJobs();
+  setInterval(pollJobs, 20000); // everyone's app checks jobs.json every 20s for changes
 }
 
 /* ---------- views ---------- */
@@ -284,7 +312,8 @@ function countBlock(j, st, now) {
   return { num: String(n), unit: n === 1 ? 'day left' : 'days left', c: urgency(n) };
 }
 function hero(open, now) {
-  if (!S.jobs.length) return ['Add your first job', 'Add a deadline, then share the link so friends see it too.'];
+  if (!jobsLoaded) return ['Loading jobs…', ''];
+  if (!S.jobs.length) return ['Add the first job', 'Add a deadline — everyone using this app sees it right away.'];
   const today = open.filter(j => LD.daysLeft(j, now) === 0);
   const tmrw = open.filter(j => LD.daysLeft(j, now) === 1);
   const sub = open[0] ? `Next last date: ${open[0].company}, ${LD.dateLabel(open[0])}` : '';
@@ -320,12 +349,12 @@ function jobRow(j, now) {
 }
 function onboardHTML() {
   return `<main class="wrap onboard"><div class="brand big">Last Date</div>
-    <p class="lead">${pending ? 'A job was shared with you. Add your name to see it and get reminders.' : 'Job deadlines with reminders before they close.'}</p>
+    <p class="lead">Job deadlines, shared with everyone using this app, with reminders before they close.</p>
     <form id="nameForm">
       <label class="field"><span>Your name</span><input name="name" required maxlength="40" autocomplete="given-name"></label>
       <button class="btn primary wide">Continue</button>
     </form>
-    <p class="fine">No account needed. Jobs and reminders are stored on this device.</p></main>`;
+    <p class="fine">Jobs are shared with everyone. Your name and applied status stay on this device.</p></main>`;
 }
 function render() {
   const app = $('#app');
@@ -337,7 +366,7 @@ function render() {
   g.open.sort(asc); g.applied.sort(asc); g.closed.sort((a, b) => asc(b, a));
   const [h, sub] = hero(g.open, now);
   const empty = {
-    open: S.jobs.length ? 'No open jobs right now.' : 'Tap Add a job to add the first one.',
+    open: !jobsLoaded ? '' : (S.jobs.length ? 'No open jobs right now.' : 'Tap Add a job to add the first one.'),
     applied: 'Jobs you mark as applied show up here and stop sending reminders.',
     closed: 'Jobs move here after their last date.'
   }[tab];
@@ -351,7 +380,6 @@ function render() {
     ${sub ? `<p class="sub">${esc(sub)}</p>` : ''}
     <div class="tabs" role="tablist">${['open', 'applied', 'closed'].map(t => `<button class="tab" role="tab" data-act="tab" data-tab="${t}" aria-selected="${tab === t}">${names[t]}<small>${g[t].length}</small></button>`).join('')}</div>
     ${g[tab].length ? `<ul class="list">${g[tab].map(j => jobRow(j, now)).join('')}</ul>` : `<p class="empty">${empty}</p>`}
-    <button class="link" data-act="paste">Add a job from a link</button>
   </main>
   <button class="fab" data-act="post">${ic('plus')}Add a job</button>`;
   updateBell();
@@ -373,7 +401,7 @@ function jobForm(j) {
       <label class="field"><span>Last date</span><input type="date" name="d" required ${j ? '' : `min="${LD.todayStr()}"`} value="${esc(v.d)}"></label>
       <label class="field"><span>Closes at</span><input type="time" name="t" value="${esc(v.t)}"></label>
     </div>
-    <label class="field"><span>Send reminders at</span><input type="time" name="rt" value="${esc(v.rt)}"><small>Friends are reminded at this time the day before and on the last date.</small></label>
+    <label class="field"><span>Send reminders at</span><input type="time" name="rt" value="${esc(v.rt)}"><small>Everyone is reminded at this time the day before and on the last date.</small></label>
     <label class="field"><span>Apply link</span><input name="link" inputmode="url" autocapitalize="off" value="${esc(v.link)}" placeholder="careers.example.com/apply"></label>
     <label class="field"><span>Eligibility or batch</span><input name="elig" maxlength="200" value="${esc(v.elig)}" placeholder="2026 batch, CS or IT"></label>
     <div class="grid2">
@@ -384,15 +412,27 @@ function jobForm(j) {
     <div class="actions"><button class="btn primary">${j ? 'Save changes' : 'Add job'}</button><button type="button" class="btn ghost" data-act="close">Cancel</button></div>
   </form>`, 'job');
 }
-async function openShare(j, mode) {
-  const link = await buildLink(j);
-  if (!link) { toast('This job cannot be shared from this device.'); return; }
+function buildLink(j) {
+  // A deep link into the shared list — it carries no data of its own, it just opens
+  // and scrolls to this job. Whoever opens it sees it because it's the same shared list.
+  return location.href.split('#')[0].split('?')[0] + '#open=' + encodeURIComponent(j.id);
+}
+function shareText(j, link, mode) {
+  const n = LD.daysLeft(j, new Date());
+  const head = mode === 'new' ? 'New job' : mode === 'update' ? 'Updated job' : n <= 0 ? 'Last day today' : n === 1 ? 'Closes tomorrow' : 'Job alert';
+  const lines = [`*${head}: ${j.company}, ${j.role}*`, `Last date: ${LD.dateLabel(j)}, ${LD.fmtTime(j.t)}`];
+  if (j.loc) lines.push(`Location: ${j.loc}`);
+  if (j.pay) lines.push(`Pay: ${j.pay}`);
+  if (j.elig) lines.push(`Eligibility: ${j.elig}`);
+  if (j.link) lines.push(`Apply: ${j.link}`);
+  lines.push('', 'Open it in Last Date:', link);
+  return lines.join('\n');
+}
+function openShare(j, mode) {
+  const link = buildLink(j);
   shareMsg = shareText(j, link, mode);
-  const head = { new: 'Job posted. Send it to your friends.', update: 'Saved. Send the update to your friends.', nudge: 'Send a reminder' }[mode];
-  const hint = mode === 'nudge'
-    ? 'Friends who already have this job keep their reminders. This nudges the group.'
-    : 'Friends who open the link get the job in Last Date, with reminders.';
-  sheet(`<div class="sheet"><h2>${head}</h2><p class="fine">${hint}</p>
+  const head = { new: 'Job added. Let people know.', update: 'Saved. Let people know it changed.', nudge: 'Send a reminder' }[mode];
+  sheet(`<div class="sheet"><h2>${head}</h2><p class="fine">Everyone using the app already sees this job — sharing is just a heads-up.</p>
     <pre class="preview">${esc(shareMsg)}</pre>
     <div class="actions stack">
       <a class="btn primary" href="https://wa.me/?text=${encodeURIComponent(shareMsg)}" target="_blank" rel="noopener noreferrer">${ic('send')}Send on WhatsApp</a>
@@ -408,12 +448,6 @@ async function copyMsg() {
   try { document.execCommand('copy'); toast('Message copied.'); } catch (e) { toast('Could not copy. Select the text and copy it.'); }
   ta.remove();
 }
-function pasteSheet() {
-  sheet(`<form class="sheet" id="pasteForm"><h2>Add a job from a link</h2>
-    <p class="fine">Paste the message or link your admin sent.</p>
-    <label class="field"><span>Message or link</span><textarea name="t" required rows="4"></textarea></label>
-    <div class="actions"><button class="btn primary">Add job</button><button type="button" class="btn ghost" data-act="close">Cancel</button></div></form>`, 'paste');
-}
 function inboxSheet() {
   const items = Object.entries(FIRED)
     .filter(([k, v]) => !v.skip && S.jobs.some(j => j.id === k.split('|')[0]))
@@ -422,7 +456,7 @@ function inboxSheet() {
   sheet(`<div class="sheet"><h2>Reminders</h2>
     ${items.length
       ? `<ul class="inbox">${items.map(i => `<li><button data-act="openjob" data-id="${esc(i.id)}"><span class="t">${esc(i.title)}</span><span class="b">${esc(i.body)}</span><span class="ago">${ago(i.t)}</span></button></li>`).join('')}</ul>`
-      : '<p class="empty">Reminders show up here when a job is posted or a last date is close.</p>'}
+      : '<p class="empty">Reminders show up here when a last date is close.</p>'}
     <div class="actions"><button class="btn ghost" data-act="close">Close</button></div></div>`, 'inbox');
   LD.update('fired', cur => { cur = cur || {}; for (const k in cur) cur[k].read = 1; return cur; }).then(refreshFired).then(updateBell);
 }
@@ -430,7 +464,7 @@ function settingsSheet() {
   sheet(`<div class="sheet"><h2>Settings</h2>
     <label class="field"><span>Your name</span><input data-set="name" value="${esc(S.me.name)}" maxlength="40" autocomplete="given-name"></label>
     ${installEvt ? '<div class="rowline"><div>Install app<br><small>Add Last Date to your home screen.</small></div><button class="btn sm" data-act="install">Install</button></div>' : ''}
-    <p class="fine">Reminders show up whenever you open the app — on the home screen, and in the bell icon for anything you missed.</p>
+    <p class="fine">The job list is shared with everyone using this app. Reminders show up whenever you open the app, and in the bell icon for anything you missed.</p>
     <div class="actions"><button class="btn danger sm" data-act="reset">Clear this device</button><button class="btn ghost" data-act="close">Close</button></div></div>`, 'settings');
 }
 
@@ -442,23 +476,29 @@ document.addEventListener('click', async e => {
   if (act === 'tab') { tab = el.dataset.tab; render(); }
   else if (act === 'toggle') { openId = openId === id ? null : id; render(); }
   else if (act === 'applied' && job) {
-    job.applied = !job.applied; openId = null;
-    await save(); render();
-    toast(job.applied ? 'Marked as applied. Its reminders are off.' : 'Back in Open. Reminders are on again.');
+    if (appliedMap[id]) delete appliedMap[id]; else appliedMap[id] = true;
+    await LD.set('applied', appliedMap);
+    job.applied = !!appliedMap[id]; openId = null;
+    render();
+    toast(job.applied ? 'Marked as applied. Its reminders are off for you.' : 'Back in Open. Reminders are on again.');
     tick();
   }
   else if (act === 'share' && job) openShare(job, 'nudge');
   else if (act === 'edit' && job) jobForm(job);
   else if (act === 'delete' && job) {
-    if (confirm(`Delete ${job.company}? Friends who already have it keep their copy.`)) {
-      S.jobs = S.jobs.filter(j => j.id !== id); openId = null;
-      await save(); await LD.clearFired(id); await refreshFired(); render(); toast('Deleted.');
+    if (!ghConfigured()) { toast('Not connected to the shared job list yet.'); return; }
+    if (confirm(`Delete ${job.company}? This removes it for everyone.`)) {
+      openId = null;
+      try {
+        await ghWrite(arr => { const i = arr.findIndex(x => x.id === id); if (i > -1) arr.splice(i, 1); }, `Delete job: ${job.company}`);
+        await LD.clearFired(id); delete appliedMap[id]; await LD.set('applied', appliedMap);
+        await refreshFired(); await pollJobs(); toast('Deleted.');
+      } catch (e) { toast('Could not delete. Check your connection and GitHub setup.'); }
     }
   }
   else if (act === 'post') jobForm();
   else if (act === 'bell') inboxSheet();
   else if (act === 'menu') settingsSheet();
-  else if (act === 'paste') pasteSheet();
   else if (act === 'close') closeSheet();
   else if (act === 'copy') copyMsg();
   else if (act === 'nativeShare') { try { await navigator.share({ text: shareMsg }); } catch (err) {} }
@@ -471,7 +511,9 @@ document.addEventListener('click', async e => {
   }
   else if (act === 'install' && installEvt) { installEvt.prompt(); installEvt = null; closeSheet(); }
   else if (act === 'reset') {
-    if (confirm('Remove all jobs, reminders and your name from this device?')) { await LD.clear(); location.href = location.href.split('#')[0]; }
+    if (confirm('Remove your name, applied status and seen reminders from this device? (Jobs themselves are shared and stay for everyone else.)')) {
+      await LD.clear(); location.href = location.href.split('#')[0];
+    }
   }
 });
 
@@ -482,11 +524,11 @@ document.addEventListener('submit', async e => {
     const name = v('name').slice(0, 40);
     if (!name) return;
     S.me = { name };
-    await save(); render();
-    if (pending) await consumePending();
-    tick();
+    await LD.set('me', S.me);
+    render(); tick();
   }
   else if (f.id === 'jobForm') {
+    if (!ghConfigured()) { toast('Not connected to the shared job list yet.'); return; }
     let link = v('link');
     if (link && !/^[a-z][a-z0-9+.-]*:/i.test(link)) link = 'https://' + link;
     const clean = link ? safeUrl(link) : '';
@@ -494,30 +536,28 @@ document.addEventListener('submit', async e => {
     const data = { company: v('company'), role: v('role'), d: v('d'), t: v('t') || '23:59', rt: v('rt') || '09:00', link: clean, elig: v('elig'), pay: v('pay'), loc: v('loc'), note: v('note') };
     if (!data.company || !data.role || !data.d) { toast('Add a company, a role and a last date.'); return; }
     const id = f.dataset.id;
-    if (id) {
-      const j = S.jobs.find(x => x.id === id);
-      if (!j) return;
-      const resched = j.d !== data.d || j.t !== data.t || j.rt !== data.rt;
-      Object.assign(j, data, { v: Date.now() });
-      await save();
-      if (resched) await LD.clearFired(id, ['d1', 'd0']);
-      await refreshFired(); render();
-      openShare(j, 'update');
-    } else {
-      const now = Date.now();
-      const j = { id: LD.newId(), v: now, postedAt: now, receivedAt: now, applied: false, by: S.me.name, ...data };
-      S.jobs.push(j);
-      await save();
-      tab = 'open'; openId = j.id; render();
-      toast('Job added: ' + j.company + ' - ' + j.role);
-      openShare(j, 'new');
-    }
-  }
-  else if (f.id === 'pasteForm') {
-    const m = v('t').match(/[#&]j=([A-Za-z0-9_-]{8,})/);
-    if (!m) { toast('No job link found in that text.'); return; }
-    closeSheet();
-    await addFromPayload(m[1]);
+    try {
+      if (id) {
+        const old = S.jobs.find(x => x.id === id);
+        if (!old) return;
+        const resched = old.d !== data.d || old.t !== data.t || old.rt !== data.rt;
+        await ghWrite(arr => {
+          const i = arr.findIndex(x => x.id === id);
+          if (i > -1) arr[i] = { ...arr[i], ...data, v: Date.now() };
+        }, `Update job: ${data.company} - ${data.role}`);
+        if (resched) await LD.clearFired(id, ['d1', 'd0']);
+        await refreshFired(); await pollJobs(); closeSheet();
+        toast('Saved.');
+        openShare({ id, ...old, ...data }, 'update');
+      } else {
+        const job = { id: newId(), ...data, by: S.me.name, postedAt: Date.now(), v: Date.now() };
+        await ghWrite(arr => { arr.push(job); }, `Add job: ${data.company} - ${data.role}`);
+        await pollJobs();
+        tab = 'open'; closeSheet();
+        toast('Job added: ' + data.company + ' - ' + data.role);
+        openShare(job, 'new');
+      }
+    } catch (err) { toast('Could not save. Check your connection and GitHub setup.'); }
   }
 });
 
@@ -526,40 +566,30 @@ document.addEventListener('change', async e => {
   if (!t.dataset || !t.dataset.set || !S.me) return;
   if (t.dataset.set === 'name') {
     const n = t.value.trim().slice(0, 40);
-    if (n) { S.me.name = n; await save(); toast('Name saved.'); }
+    if (n) { S.me.name = n; await LD.set('me', S.me); toast('Name saved.'); }
   }
 });
 
 window.addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; });
-window.addEventListener('hashchange', () => {
-  if (location.hash.startsWith('#j=')) {
-    pending = location.hash.slice(3);
-    if (S.me) consumePending(); else render();
-  }
-});
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') tick(); });
 
 /* ---------- start ---------- */
 async function boot() {
   try {
-    S = (await LD.get('state')) || S;
-    S.jobs = S.jobs || [];
+    S.me = (await LD.get('me')) || null;
+    appliedMap = (await LD.get('applied')) || {};
     await refreshFired();
   } catch (e) {
-    toast('Storage is blocked in this browser, so jobs will not be saved.');
+    toast('Storage is blocked in this browser, so your name and applied status will not be saved.');
   }
   const h = location.hash;
-  if (h.startsWith('#j=')) pending = h.slice(3);
-  else if (h.startsWith('#open=')) {
+  if (h.startsWith('#open=')) {
     openId = decodeURIComponent(h.slice(6));
     history.replaceState(null, '', location.href.split('#')[0]);
-    const j = S.jobs.find(x => x.id === openId);
-    if (j) tab = status(j, new Date());
   }
   render();
-  if (S.me && pending) await consumePending();
-  await tick();
-  setInterval(tick, 30000);
+  await initGithub();
+  setInterval(tick, 30000); // time-based reminder check, independent of polling for new/changed jobs
 }
 
 if ('serviceWorker' in navigator) {

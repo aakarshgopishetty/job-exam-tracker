@@ -1,8 +1,10 @@
-/* Last Date: logic shared by the page and the service worker. */
+/* Last Date: date/reminder logic, plus a tiny local KV store for personal (per-device) bits
+   like your name, which jobs you marked "applied", and which reminders you've already seen.
+   The job list itself lives in jobs.json in your GitHub repo (see index.html) so everyone sees the same jobs. */
 (function (g) {
   'use strict';
 
-  /* ---------- storage: one small IndexedDB store, readable from page and service worker ---------- */
+  /* ---------- local storage: small IndexedDB store for personal, per-device data ---------- */
   const DB = 'lastdate', ST = 'kv';
   let dbp;
   const open = () => dbp || (dbp = new Promise((res, rej) => {
@@ -28,7 +30,6 @@
       tx.onerror = () => rej(tx.error);
     });
   };
-  // read-modify-write inside one transaction, so the page and the service worker never clobber each other
   const update = async (k, fn) => {
     const db = await open();
     return new Promise((res, rej) => {
@@ -49,38 +50,6 @@
       tx.onerror = () => rej(tx.error);
     });
   };
-
-  /* ---------- share-link codec: job -> compressed, URL-safe text ---------- */
-  const b64 = bytes => {
-    let s = '';
-    for (const b of bytes) s += String.fromCharCode(b);
-    return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
-  };
-  const unb64 = str => {
-    str = str.replace(/-/g, '+').replace(/_/g, '/');
-    while (str.length % 4) str += '=';
-    const s = atob(str), out = new Uint8Array(s.length);
-    for (let i = 0; i < s.length; i++) out[i] = s.charCodeAt(i);
-    return out;
-  };
-  const pipe = async (bytes, stream) => {
-    const w = stream.writable.getWriter();
-    w.write(bytes).catch(() => {});
-    w.close().catch(() => {});
-    return new Uint8Array(await new Response(stream.readable).arrayBuffer());
-  };
-  async function encode(obj) {
-    // No compression: some phones/in-app browsers (e.g. WhatsApp's) lack DecompressionStream,
-    // which silently broke links for those friends. Plain base64 decodes everywhere.
-    const raw = new TextEncoder().encode(JSON.stringify(obj));
-    return 'r' + b64(raw);
-  }
-  async function decode(str) {
-    const bytes = unb64(str.slice(1));
-    const raw = str[0] === 'z' ? await pipe(bytes, new DecompressionStream('deflate-raw')) : bytes;
-    return JSON.parse(new TextDecoder().decode(raw));
-  }
-  const newId = () => Math.random().toString(36).slice(2, 8) + Date.now().toString(36).slice(-4);
 
   /* ---------- dates (all local time) ---------- */
   const pad = n => String(n).padStart(2, '0');
@@ -104,12 +73,11 @@
   const fmtTime = t => at('2000-01-01', t).toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' });
   const dateLabel = j => at(j.d, '00:00').toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' });
 
-  /* ---------- reminders ---------- */
-  // Day-before and last-date reminders go out at the time the admin chose for this job.
+  /* ---------- reminders (computed locally per device from the shared job list) ---------- */
   function times(j) {
     const dl = deadlineAt(j);
     let d0 = at(j.d, j.rt || '09:00');
-    if (d0 >= dl) d0 = new Date(dl.getTime() - 30 * 60000); // never after the deadline itself
+    if (d0 >= dl) d0 = new Date(dl.getTime() - 30 * 60000);
     const d1 = at(shiftDay(j.d, -1), j.rt || '09:00');
     return { d1, d0, dl };
   }
@@ -125,32 +93,26 @@
     return { title: `Closing soon: ${c}`, body: `${r}. ${n} days left.` };
   }
 
-  // Which reminders are due right now, and which should be skipped silently
-  // (already covered by a later one, or their moment passed before the job arrived on this device).
   function evaluate(jobs, fired, now) {
     const fire = [], skip = [];
     for (const j of jobs) {
       if (j.applied || now > deadlineAt(j)) continue;
-      const t = times(j), recv = j.receivedAt || 0;
+      const t = times(j);
       const k0 = j.id + '|d0', k1 = j.id + '|d1';
       const due0 = now >= t.d0 && !fired[k0];
       const due1 = now >= t.d1 && !fired[k1];
-      if (due0) {
-        if (t.d0 >= recv) fire.push({ job: j, kind: 'd0' }); else skip.push(k0);
-        if (due1) skip.push(k1);
-      } else if (due1) {
-        if (t.d1 >= recv) fire.push({ job: j, kind: 'd1' }); else skip.push(k1);
-      }
+      if (due0) { fire.push({ job: j, kind: 'd0' }); if (due1) skip.push(k1); }
+      else if (due1) fire.push({ job: j, kind: 'd1' });
     }
     return { fire, skip };
   }
 
-  async function runDue(show) {
-    const st = await get('state');
-    if (!st || !st.jobs || !st.jobs.length) return [];
+  // jobs: the current shared list (from jobs.json on GitHub, held in memory by the page).
+  async function runDue(jobs, show) {
+    if (!jobs || !jobs.length) return [];
     const now = new Date();
     const fired = (await get('fired')) || {};
-    const { fire, skip } = evaluate(st.jobs, fired, now);
+    const { fire, skip } = evaluate(jobs, fired, now);
     if (!fire.length && !skip.length) return [];
     const out = [];
     await update('fired', cur => {
@@ -158,7 +120,7 @@
       for (const k of skip) if (!cur[k]) cur[k] = { t: +now, skip: 1 };
       for (const f of fire) {
         const key = f.job.id + '|' + f.kind;
-        if (cur[key]) continue; // the other side (page or worker) got there first
+        if (cur[key]) continue;
         const m = message(f.job, f.kind, now);
         cur[key] = { t: +now, title: m.title, body: m.body, read: 0 };
         out.push({ key, jobId: f.job.id, title: m.title, body: m.body });
@@ -179,5 +141,5 @@
     return cur;
   });
 
-  g.LD = { get, set, update, clear, encode, decode, newId, pad, at, shiftDay, todayStr, deadlineAt, daysLeft, fmtTime, dateLabel, times, message, evaluate, runDue, setFired, clearFired };
+  g.LD = { get, set, update, clear, pad, at, shiftDay, todayStr, deadlineAt, daysLeft, fmtTime, dateLabel, times, message, evaluate, runDue, setFired, clearFired };
 })(typeof self !== 'undefined' ? self : window);
